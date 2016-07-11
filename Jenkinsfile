@@ -101,6 +101,7 @@ node {
                 }
             }, seleniumTests: {
                 echo 'This stage simulates web ui tests'
+                //
                 // sh "${mvnHome}/bin/mvn -B -Dmaven.test.failure.ignore verify"
                 // sh "${mvnHome}/bin/mvn test"
             }, owaspAnalysis: {
