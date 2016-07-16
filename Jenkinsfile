@@ -1,6 +1,6 @@
 #!groovy
 
-// Global Variables 
+// Global Variables
 properties([
     [$class: 'ParametersDefinitionProperty', parameterDefinitions: [
         [$class: 'StringParameterDefinition', name: 'APP_NAME', defaultValue: 'namaste', description: "Application Name - all resources use this name as a lebel"],
@@ -11,10 +11,10 @@ properties([
         [$class: 'StringParameterDefinition', name: 'CRED_OPENSHIFT_DEV', defaultValue: 'CRED_OPENSHIFT_DEV', description: "ID of Development OSE Jenkins credential"],
         [$class: 'StringParameterDefinition', name: 'CRED_OPENSHIFT_QA', defaultValue: 'CRED_OPENSHIFT_QA', description: "ID of Test OSE Jenkins credential"],
         [$class: 'StringParameterDefinition', name: 'CRED_OPENSHIFT_PROD', defaultValue: 'CRED_OPENSHIFT_PROD', description: "ID of Production OSE Jenkins credential"],
-        [$class: 'StringParameterDefinition', name: 'CRED_SONARQUBE', defaultValue: 'CRED_SONARQUBE', description: "ID of Sonarqube credentials credential"],                        
+        [$class: 'StringParameterDefinition', name: 'CRED_SONARQUBE', defaultValue: 'CRED_SONARQUBE', description: "ID of Sonarqube credentials credential"],
         [$class: 'StringParameterDefinition', name: 'DEV_POD_NUMBER', defaultValue: '1', description: "Number of development pods we desire"],
         [$class: 'StringParameterDefinition', name: 'QA_POD_NUMBER', defaultValue: '1', description: "Number of test pods we desire"],
-        [$class: 'StringParameterDefinition', name: 'PROD_POD_NUMBER', defaultValue: '1', description: "Number of production pods we desire"],
+        [$class: 'StringParameterDefinition', name: 'PROD_POD_NUMBER', defaultValue: '2', description: "Number of production pods we desire"],
         [$class: 'StringParameterDefinition', name: 'SKIP_TESTS', defaultValue: 'false', description: "Skip Test Stages (true || false)"],
         [$class: 'StringParameterDefinition', name: 'PROJECT_PER_DEV_BUILD', defaultValue: 'true', description: "Create A Project Per Dev Build (true || false)"],
         [$class: 'StringParameterDefinition', name: 'PROJECT_PER_TEST_BUILD', defaultValue: 'true', description: "Create A Project Per Test Build (true || false)"],
@@ -28,14 +28,14 @@ echo "Branch name is: ${env.BRANCH_NAME}"
 echo "Git URL is: ${GIT_URL}"
 
 // build properties (acts as check - these echo's will fail if properties not bound)
-echo "Application Name is: ${APP_NAME}"    
+echo "Application Name is: ${APP_NAME}"
 echo "OpenShift Master is: ${OPENSHIFT_MASTER}"
 echo "OpenShist Registry is: ${OPENSHIFT_REGISTRY}"
 echo "Sonarqube is: ${SONARQUBE}"
 echo "Developer Credential ID is: ${CRED_OPENSHIFT_DEV}"
 echo "Test Credential ID is: ${CRED_OPENSHIFT_QA}"
 echo "Production Credential ID is: ${CRED_OPENSHIFT_PROD}"
-echo "SonarQube Credential ID is: ${CRED_SONARQUBE}"    
+echo "SonarQube Credential ID is: ${CRED_SONARQUBE}"
 echo "Expected Dev Pod Number is: ${DEV_POD_NUMBER}"
 echo "Expected QA Pod Number is: ${QA_POD_NUMBER}"
 echo "Expected Prod Pod Number is: ${PROD_POD_NUMBER}"
@@ -44,93 +44,125 @@ echo "Project per Dev Build is: ${PROJECT_PER_DEV_BUILD}"
 echo "Project per Test Build is: ${PROJECT_PER_TEST_BUILD}"
 echo "Production Project Name is: ${PROD_PROJECT_NAME}"
 
-// set oc cle cmd to use kubeconfig per build else we conflict with single user
+// set oc cli cmd to use kubeconfig per build else we conflict with single user
 oc = "KUBECONFIG=~/.kube/config-${APP_NAME}-${env.BRANCH_NAME}-${env.BUILD_NUMBER} oc"
 
+// project per build
+def devProject = ''
+if ("${PROJECT_PER_DEV_BUILD}"=='true') {
+    devProject = "${APP_NAME}-dev-${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+} else {
+    devProject = "${APP_NAME}-dev"
+}
 
+def testProject = ''
+if ("${PROJECT_PER_TEST_BUILD}"=='true') {
+    testProject = "${APP_NAME}-qa-${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+} else {
+    testProject = "${APP_NAME}-qa"
+}
+
+stage 'Build project with Maven'
 node {
-    stage 'Git checkout'
     echo 'Checking out git repository'
     git url: "${GIT_URL}/${APP_NAME}", branch: "${env.BRANCH_NAME}"
 
-    // tools
+    echo 'Building project'
     def mvnHome = tool 'M3'
     def javaHome = tool 'jdk8'
-    def sonarHome =  tool 'SQ'
-
-    stage 'Build project with Maven'
-    echo 'Building project'
     sh "${mvnHome}/bin/mvn clean package"
-
-    def devProject = ''
-    if ("${PROJECT_PER_DEV_BUILD}"=='true') {
-        devProject = "${APP_NAME}-dev-${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
-    } else {
-        devProject = "${APP_NAME}-dev"
-    }
-
-    def testProject = ''
-    if ("${PROJECT_PER_TEST_BUILD}"=='true') {
-        testProject = "${APP_NAME}-qa-${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
-    } else {
-        testProject = "${APP_NAME}-qa"
-    }    
-
-    stage 'Build image and deploy in Dev'
-    echo 'Building docker image and deploying to Dev'
-    buildProject("${devProject}", "${CRED_OPENSHIFT_DEV}", "${DEV_POD_NUMBER}", "${PROJECT_PER_DEV_BUILD}")
-
-    stage 'Verify deployment in Dev'
-    verifyDeployment("${devProject}", "${CRED_OPENSHIFT_DEV}", '1')
-
-    if ("${SKIP_TESTS}"=='false') {
-        stage 'Automated tests'
-        parallel(
-           unitTests:{
-                echo 'This stage simulates automated unit tests'
-                sh "${mvnHome}/bin/mvn -B -Dmaven.test.failure.ignore verify"
-                //step([$class: 'ArtifactArchiver', artifacts: '**/target/*.jar', fingerprint: true])
-                //step([$class: 'JUnitResultArchiver', testResults: '**/target/surefire-reports/TEST-*.xml'])
-            }, sonarAnalysis: {
-                withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${CRED_SONARQUBE}",
-                    usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]) {
-                    echo 'run sonar tests'
-                    sonarIP = getIP("${SONARQUBE}")
-                    sh "${sonarHome}/bin/sonar-scanner -Dsonar.projectKey=${APP_NAME} -Dsonar.projectName=${APP_NAME} -Dsonar.host.url=http://${sonarIP}:9000 -Dsonar.login=admin -Dsonar.password=admin -Dsonar.projectVersion=1.0.0-SNAPSHOT -Dsonar.sources=src/main"
-                    //sh "${mvnHome}/bin/mvn -Dsonar.scm.disabled=True -Dsonar.jdbc.username=$USERNAME -Dsonar.jdbc.password=$PASSWORD sonar:sonar"
-                }
-            }, seleniumTests: {
-                echo 'This stage simulates web ui tests'
-                //
-                // sh "${mvnHome}/bin/mvn -B -Dmaven.test.failure.ignore verify"
-                // sh "${mvnHome}/bin/mvn test"
-            }, owaspAnalysis: {
-                echo 'This stage checks dependencies for vulnerabilities'
-                build job: "${APP_NAME}-dependency-check", wait: true
-            }, failFast: true
-        )
-    }
-
-    stage 'Deploy to QA'
-    echo 'Deploying to QA'
-    deployProject("${devProject}", "${testProject}", "${CRED_OPENSHIFT_DEV}", "${CRED_OPENSHIFT_QA}", 'promote', "${DEV_POD_NUMBER}", "${PROJECT_PER_TEST_BUILD}")
-
-    stage 'Verify deployment in QA'
-    verifyDeployment("${testProject}", "${CRED_OPENSHIFT_QA}", "${QA_POD_NUMBER}")
-
-    stage 'Wait for approval from OPS'
-    timeout(time: 2, unit: 'DAYS') {
-        input message: 'Approve to production?', submitter: 'ops'
-    }
-        
-    stage 'Deploy to production'
-    echo 'Deploying to production'
-    deployProject("${devProject}", "${PROD_PROJECT_NAME}", "${CRED_OPENSHIFT_DEV}", "${CRED_OPENSHIFT_PROD}", 'prod', "${PROD_POD_NUMBER}", 'true')
-
-    stage 'Verify deployment in Production'
-    verifyDeployment("${PROD_PROJECT_NAME}", "${CRED_OPENSHIFT_PROD}", "${PROD_POD_NUMBER}")
     
-    stage 'Wait for Delete Development & Test Projects'
+    stash excludes: 'target/', includes: '**', name: 'source'
+    stash includes: 'target/', name: 'build'
+}
+
+stage 'Build image and deploy in Dev'
+node {
+    echo 'Building docker image and deploying to Dev'
+    unstash 'source'
+    buildProject("${devProject}", "${CRED_OPENSHIFT_DEV}", "${DEV_POD_NUMBER}", "${PROJECT_PER_DEV_BUILD}")
+}
+
+stage 'Verify deployment in Dev'
+node {
+    verifyDeployment("${devProject}", "${CRED_OPENSHIFT_DEV}", '1')
+}
+
+if ("${SKIP_TESTS}"=='false') {
+
+    stage 'Automated tests'
+    parallel 'unitTests': {
+        node {
+            unstash 'source'
+            echo 'This stage simulates automated unit tests'
+            def mvnHome = tool 'M3'
+            sh "${mvnHome}/bin/mvn -B -Dmaven.test.failure.ignore verify"
+            //step([$class: 'ArtifactArchiver', artifacts: '**/target/*.jar', fingerprint: true])
+            //step([$class: 'JUnitResultArchiver', testResults: '**/target/surefire-reports/TEST-*.xml'])
+
+        }
+    }, 'sonarAnalysis': {
+        node {
+            unstash 'source'
+            withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: "${CRED_SONARQUBE}",
+                usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]) {
+                echo 'run sonar tests'
+                sonarIP = getIP("${SONARQUBE}")
+                def sonarHome =  tool 'SQ'
+                sh "${sonarHome}/bin/sonar-scanner -Dsonar.projectKey=${APP_NAME} -Dsonar.projectName=${APP_NAME} -Dsonar.host.url=http://${sonarIP}:9000 -Dsonar.login=admin -Dsonar.password=admin -Dsonar.projectVersion=1.0.0-SNAPSHOT -Dsonar.sources=src/main"
+                // def mvnHome = tool 'M3'
+                //sh "${mvnHome}/bin/mvn -Dsonar.scm.disabled=True -Dsonar.jdbc.username=$USERNAME -Dsonar.jdbc.password=$PASSWORD sonar:sonar"
+            }
+        }
+    }, 'seleniumTests': {
+        node {
+            unstash 'source'
+            echo 'This stage simulates web ui tests'
+            def mvnHome = tool 'M3'
+            sh "${mvnHome}/bin/mvn -B -Dmaven.test.failure.ignore verify"
+            // sh "${mvnHome}/bin/mvn test"
+        }
+    }, 'owaspAnalysis': {
+        node {
+            unstash 'source'
+            echo 'This stage checks dependencies for vulnerabilities'
+            build job: "${APP_NAME}-dependency-check", wait: true
+        }
+    }, failFast: true
+    
+}
+
+stage 'Deploy to QA'
+node {
+    echo 'Deploying to QA'
+    unstash 'build'
+    deployProject("${devProject}", "${testProject}", "${CRED_OPENSHIFT_DEV}", "${CRED_OPENSHIFT_QA}", 'promote', "${DEV_POD_NUMBER}", "${PROJECT_PER_TEST_BUILD}")
+}
+
+stage 'Verify deployment in QA'
+node {
+    verifyDeployment("${testProject}", "${CRED_OPENSHIFT_QA}", "${QA_POD_NUMBER}")
+}
+
+
+stage 'Deploy to production'
+timeout(time: 2, unit: 'DAYS') {
+    input message: 'OPS Approve to production?', submitter: 'ops'
+}
+
+node {
+    echo 'Deploying to production'
+    unstash 'build'
+    deployProject("${devProject}", "${PROD_PROJECT_NAME}", "${CRED_OPENSHIFT_DEV}", "${CRED_OPENSHIFT_PROD}", 'prod', "${PROD_POD_NUMBER}", 'true')
+}
+
+stage 'Verify deployment in Production'
+node {
+    verifyDeployment("${PROD_PROJECT_NAME}", "${CRED_OPENSHIFT_PROD}", "${PROD_POD_NUMBER}")
+}
+
+stage 'Wait for Delete Development & Test Projects'
+node {
     timeout(time: 7, unit: 'DAYS') {
         input 'Delete Development & Test Projects?'
         echo 'Delete Development & Test Projects'
@@ -201,7 +233,7 @@ def appDeploy(String project, String tag, String replicas, String newProject){
         def patch1 = $/${oc} patch dc/"${APP_NAME}" -p $'{\"spec\":{\"triggers\":[{\"type\": \"ConfigChange\"},{\"type\":\"ImageChange\",\"imageChangeParams\":{\"automatic\":true,\"containerNames\":[\"${APP_NAME}\"],\"from\":{\"kind\":\"ImageStreamTag\",\"namespace\":\"${project}\",\"name\":\"${APP_NAME}:${tag}\"}}}]}}$' -p $'{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"${APP_NAME}\",\"image\":\"${registryIP}:5000$/${project}$/${APP_NAME}:${tag}\"}]}}}}$'/$
         sh patch1
         sh "${oc} deploy dc/${APP_NAME} --latest || echo 'Deploy already in progress'"
-        sh "${oc} set triggers dc/${APP_NAME} --auto"        
+        sh "${oc} set triggers dc/${APP_NAME} --auto"
     }
     else if (fileExists('status')) {
         // not a new project deploy and no existing DC
@@ -223,14 +255,14 @@ def getToken(String credentialsId){
         token = readFile 'token'
         token = token.trim()
         sh 'rm token'
-        return token        
+        return token
     }
 }
 
 // Verify Openshift deploy
 def verifyDeployment(String project, String credentialsId, String podReplicas){
     projectSet(project, credentialsId)
-    def authToken = getToken(credentialsId)    
+    def authToken = getToken(credentialsId)
     openShiftVerifyDeployment(authToken: "${authToken}", namespace: "${project}", depCfg: "${APP_NAME}", replicaCount:"${podReplicas}", verifyReplicaCount: 'true', waitTime: '180000')
 }
 
